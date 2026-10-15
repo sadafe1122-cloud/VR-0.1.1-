@@ -76,7 +76,7 @@ def styled_label(text, **kw):
     return Label(text=text, color=TEXT, **kw)
 
 
-class SettingsPanel(BoxLayout):
+class VRSettingsPanel(BoxLayout):
     def __init__(self, vr, **kwargs):
         self.vr = vr
         super().__init__(orientation='vertical', padding=14, spacing=8,
@@ -126,6 +126,10 @@ class SettingsPanel(BoxLayout):
         self.flip_btn.bind(on_release=self.toggle_flip)
         self.add_widget(self.flip_btn)
 
+        self.fps_btn = styled_button('', size_hint_y=None, height=40)
+        self.fps_btn.bind(on_release=self.toggle_fps)
+        self.add_widget(self.fps_btn)
+
         self.add_widget(styled_label('Experimental Version', italic=True,
                                      size_hint_y=None, height=26))
 
@@ -152,6 +156,7 @@ class SettingsPanel(BoxLayout):
         self.size_label.text = 'Image size: %d%%' % round(vr.size_scale * 100)
         self.gap_label.text = 'Gap between images: %d px' % round(vr.gap)
         self.flip_btn.text = 'Rotate image 180: %s' % ('ON' if vr.manual_flip else 'OFF')
+        self.fps_btn.text = 'Frame rate: %s' % ('60 FPS' if vr.fps >= 60 else 'Normal (30 FPS)')
 
     def change_camera(self, step):
         self.vr.set_camera((self.vr.cam_index + step) % self.vr.cam_count)
@@ -163,6 +168,10 @@ class SettingsPanel(BoxLayout):
 
     def change_gap(self, _inst, value):
         self.vr.gap = value
+        self.refresh_labels()
+
+    def toggle_fps(self, *_):
+        self.vr.set_fps(30 if self.vr.fps >= 60 else 60)
         self.refresh_labels()
 
     def toggle_flip(self, *_):
@@ -195,12 +204,13 @@ class VRWidget(FloatLayout):
         self.size_scale = 1.0
         self.gap = 0.0
         self.manual_flip = False
+        self.fps = 30            # 30 = normal, 60 = high
         self.camera = None
         self.panel = None
 
         # hidden menu button (top-right corner)
-        self.menu_btn = styled_button('MENU', size_hint=(None, None),
-                                      size=(90, 44),
+        self.menu_btn = styled_button('Settings', size_hint=(None, None),
+                                      size=(130, 54), font_size='18sp',
                                       pos_hint={'right': 0.99, 'top': 0.98})
         self.menu_btn.opacity = 0
         self.menu_btn.disabled = True
@@ -208,7 +218,7 @@ class VRWidget(FloatLayout):
         self.add_widget(self.menu_btn)
         self._hide_event = None
 
-        Clock.schedule_interval(self.update_vr, 1 / 30)
+        self._tick = Clock.schedule_interval(self.update_vr, 1.0 / self.fps)
 
     # ---- camera
     def start_camera(self, *_):
@@ -226,6 +236,47 @@ class VRWidget(FloatLayout):
         self.camera.play = False
         self.camera.index = index
         self.camera.play = True
+        Clock.schedule_once(self.apply_camera_fps, 1.0)
+
+    def set_fps(self, fps):
+        self.fps = fps
+        self._tick.cancel()
+        self._tick = Clock.schedule_interval(self.update_vr, 1.0 / fps)
+        self.apply_camera_fps()
+
+    def apply_camera_fps(self, *_):
+        """Best effort: ask the camera itself for 60 (or ~30) fps preview.
+        The redraw rate always follows the setting; the real camera rate
+        depends on what the phone's camera supports at this resolution."""
+        if platform != 'android' or self.camera is None:
+            return
+        try:
+            cam = self.camera._camera._android_camera
+            params = cam.getParameters()
+            flat = str(params.flatten())
+            ranges = []
+            for part in flat.split(';'):
+                if part.startswith('preview-fps-range-values='):
+                    txt = part.split('=', 1)[1]
+                    for pair in txt.strip('()').split('),('):
+                        lo, hi = pair.split(',')
+                        ranges.append((int(lo), int(hi)))
+            if not ranges:
+                return
+            if self.fps >= 60:
+                cands = [r for r in ranges if r[1] >= 60000]
+                best = max(cands, key=lambda r: (r[1], r[0])) if cands else None
+            else:
+                cands = [r for r in ranges if r[1] <= 30000]
+                best = max(cands, key=lambda r: (r[1], r[0])) if cands else None
+            if best is None:
+                return
+            cam.stopPreview()
+            params.setPreviewFpsRange(best[0], best[1])
+            cam.setParameters(params)
+            cam.startPreview()
+        except Exception as e:
+            print('Camera fps change failed:', e)
 
     # ---- hidden menu button
     def on_touch_down(self, touch):
@@ -259,7 +310,7 @@ class VRWidget(FloatLayout):
             self._hide_event.cancel()
         self.menu_btn.opacity = 0
         self.menu_btn.disabled = True
-        self.panel = SettingsPanel(self)
+        self.panel = VRSettingsPanel(self)
         self.add_widget(self.panel)
 
     def close_settings(self):
